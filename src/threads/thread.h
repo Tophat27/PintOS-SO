@@ -92,6 +92,7 @@ struct thread
     int nice;
     int recent_cpu;
 
+    int64_t wakeup_tick;
     /* Shared between thread.c and synch.c. */
     struct list_elem elem;              /* List element. */
 

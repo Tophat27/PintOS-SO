@@ -30,6 +30,17 @@ static void busy_wait (int64_t loops);
 static void real_time_sleep (int64_t num, int32_t denom);
 static void real_time_delay (int64_t num, int32_t denom);
 
+static struct list sleep_list; //lista de threads dormindo,ordenada dps por wakeup tick
+
+static bool
+wakeup_less (const struct list_elem *a_, const struct list_elem *b_,
+             void *aux UNUSED)
+{
+  const struct thread *a = list_entry (a_, struct thread, elem);
+  const struct thread *b = list_entry (b_, struct thread, elem);
+  return a->wakeup_tick < b->wakeup_tick;
+}
+
 /* Sets up the timer to interrupt TIMER_FREQ times per second,
    and registers the corresponding interrupt. */
 void
@@ -37,6 +48,7 @@ timer_init (void)
 {
   pit_configure_channel (0, 2, TIMER_FREQ);
   intr_register_ext (0x20, timer_interrupt, "8254 Timer");
+  list_init(&sleep_list);
 }
 
 /* Calibrates loops_per_tick, used to implement brief delays. */
@@ -87,15 +99,25 @@ timer_elapsed (int64_t then)
 /* Sleeps for approximately TICKS timer ticks.  Interrupts must
    be turned on. */
 void
-timer_sleep (int64_t ticks) 
+timer_sleep (int64_t ticks)
 {
-  int64_t start = timer_ticks ();
+  if (ticks <= 0)
+    return;
 
   ASSERT (intr_get_level () == INTR_ON);
-  while (timer_elapsed (start) < ticks) 
-    thread_yield ();
-}
 
+  struct thread *current = thread_current ();
+  int64_t wakeup_tick = timer_ticks () + ticks;
+
+  enum intr_level old_level = intr_disable ();
+
+  current->wakeup_tick = wakeup_tick;
+  list_insert_ordered (&sleep_list, &current->elem, wakeup_less, NULL);
+
+  thread_block ();
+
+  intr_set_level (old_level);
+}
 /* Sleeps for approximately MS milliseconds.  Interrupts must be
    turned on. */
 void
@@ -175,6 +197,21 @@ timer_interrupt (struct intr_frame *args UNUSED)
 
   if (thread_mlfqs)
     thread_mlfqs_tick (ticks, TIMER_FREQ);
+  while (!list_empty (&sleep_list))
+    {
+      struct list_elem *e = list_begin (&sleep_list);
+      struct thread *t = list_entry (e, struct thread, elem);
+
+      if (t->wakeup_tick > ticks)
+        break;
+
+      list_remove (e);
+      thread_unblock (t);
+
+      /* Se a thread acordada tem prioridade maior, preempta ao sair da IRQ. */
+      if (t->priority > thread_current ()->priority)
+        intr_yield_on_return ();
+    }
 }
 
 /* Returns true if LOOPS iterations waits for more than one timer
